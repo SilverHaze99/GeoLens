@@ -59,4 +59,4 @@ Run GeoLens in a virtual environment to manage dependencies effectively.
 Ensure your virtual environment is still activated, then simply execute the Python script:
 
 ```bash
-python GeoLens.py
+python geolens.py
