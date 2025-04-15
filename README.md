@@ -60,3 +60,15 @@ Ensure your virtual environment is still activated, then simply execute the Pyth
 
 ```bash
 python geolens.py
+```
+
+## Models used
+
+This project uses the model [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32), which was originally published by [OpenAI](https://openai.com/).
+
+The model is based on CLIP (Contrastive Language-Image Pretraining) and is licensed under the [MIT licence](https://github.com/openai/CLIP/blob/main/LICENSE).
+
+> **Copyright:** 
+> Copyright (c) 2021 OpenAI 
+> Licensed under the MIT Licence.
+
