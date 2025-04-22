@@ -30,8 +30,8 @@ Run GeoLens in a virtual environment to manage dependencies effectively.
 
 1.  **Clone the repository** (if you are using Git):
     ```bash
-    git clone [repository URL]
-    cd [repository directory]
+    git clone https://github.com/SilverHaze99/GeoLens
+    cd GeoLens
     ```
 2.  **Create a virtual environment:**
     ```bash
