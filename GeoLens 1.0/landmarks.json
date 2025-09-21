@@ -1,0 +1,38 @@
+{
+    "Paris": {
+        "general_label": "a landmark in Paris",
+        "specific_labels": [
+            "Eiffel Tower",
+            "Paris Eiffel Tower",
+            "Eiffel Tower with building in foreground",
+            "Eiffel Tower from a distance",
+            "iron lattice tower",
+            "Louvre Museum",
+            "Notre-Dame Cathedral"
+        ],
+        "key_landmarks": [
+            "Eiffel Tower",
+            "Paris Eiffel Tower",
+            "Eiffel Tower with building in foreground",
+            "Eiffel Tower from a distance",
+            "iron lattice tower"
+        ]
+    },
+    "Berlin": {
+        "general_label": "a landmark in Berlin",
+        "specific_labels": [
+            "Brandenburger Tor",
+            "Brandenburg Gate",
+            "Brandenburg Gate at day",
+            "Berlin landmark with columns",
+            "Reichstag building",
+            "Berlin Cathedral"
+        ],
+        "key_landmarks": [
+            "Brandenburger Tor",
+            "Brandenburg Gate",
+            "Brandenburg Gate at day",
+            "Berlin landmark with columns"
+        ]
+    }
+}
