@@ -41,16 +41,15 @@ try:
 except ImportError:
     YOLO_AVAILABLE = False
 
-# Nach den Imports, vor "class PerformanceMode(Enum):"
 class IconManager:
     """Manages SVG and PNG icons for the application"""
-    
+
     @staticmethod
     def get_icon(icon_name: str, size: int = 16) -> QIcon:
         """Load icon from assets folder"""
         icon_path = os.path.join("assets", f"{icon_name}.svg")
         png_path = os.path.join("assets", f"{icon_name}.png")
-        
+
         # Try SVG first, then PNG, then fallback
         if os.path.exists(icon_path):
             return QIcon(icon_path)
@@ -61,13 +60,13 @@ class IconManager:
             pixmap = QPixmap(size, size)
             pixmap.fill(Qt.GlobalColor.transparent)
             return QIcon(pixmap)
-    
+
     @staticmethod
     def get_icon_html(icon_name: str, size: int = 16) -> str:
         """Get HTML representation of icon for rich text"""
         icon_path = os.path.join("assets", f"{icon_name}.svg")
         png_path = os.path.join("assets", f"{icon_name}.png")
-        
+
         if os.path.exists(icon_path):
             return f'<img src="{icon_path}" width="{size}" height="{size}" style="vertical-align: middle;">'
         elif os.path.exists(png_path):
@@ -90,12 +89,12 @@ class RiskDetection:
 class AnalysisWorker(QThread):
     finished = Signal(list, object)
     progress = Signal(str)
-    
+
     def __init__(self, analyzer, image_path):
         super().__init__()
         self.analyzer = analyzer
         self.image_path = image_path
-    
+
     def run(self):
         try:
             loading_text = IconManager.get_icon_html("loading", 16) + " Loading models..."
@@ -109,12 +108,12 @@ class AnalysisWorker(QThread):
 class MultiImageAnalysisWorker(QThread):
     finished = Signal(list)
     progress = Signal(str)
-    
+
     def __init__(self, analyzer, image_paths):
         super().__init__()
         self.analyzer = analyzer
         self.image_paths = image_paths
-    
+
     def run(self):
         try:
             results = self.analyzer.analyze_multiple_images(self.image_paths)
@@ -124,12 +123,23 @@ class MultiImageAnalysisWorker(QThread):
             self.finished.emit([])
 
 class PrivacyRiskAnalyzer:
+
+    _global_model_cache = {}
+    _yolo_cache = None
+    _ocr_cache = {}
+
     def __init__(self, performance_mode: PerformanceMode = PerformanceMode.BALANCED):
         self.performance_mode = performance_mode
         self.device = self._get_device()
-        self.models = {}
         self.config = self._get_config_for_mode()
-        
+        self.models = {}
+        self.models_dir = os.path.join(os.getcwd(), "models")
+        os.makedirs(self.models_dir, exist_ok=True)
+
+        print(f"[INIT] Initializing {performance_mode.value} mode...") # added for better loading Debug
+        self._preload_models()
+        print(f"[INIT] All models ready!")
+
         self.RISK_PATTERNS = {
             "street_infrastructure": {
                 "patterns": [
@@ -173,14 +183,14 @@ class PrivacyRiskAnalyzer:
             },
             "business_signage": {
                 "patterns": [
-                    "store sign with text", "restaurant sign", "shop name", 
+                    "store sign with text", "restaurant sign", "shop name",
                     "business logo", "storefront with name"
                 ],
                 "risk_level": 3,
                 "description": "Business names can be searched/located online"
             }
         }
-        
+
         self.TEXT_RISK_PATTERNS = {
             "location_indicators": {
                 "patterns": [
@@ -214,8 +224,8 @@ class PrivacyRiskAnalyzer:
             return "cuda"
         else:
             return "cpu"
-    
-    def _get_config_for_mode(self):
+
+    def _get_config_for_mode(self): # fine tuning
         configs = {
             PerformanceMode.FAST: {
                 "clip_model": "openai/clip-vit-base-patch32",
@@ -225,7 +235,7 @@ class PrivacyRiskAnalyzer:
                 "image_size": (224, 224)
             },
             PerformanceMode.BALANCED: {
-                "clip_model": "openai/clip-vit-base-patch32", 
+                "clip_model": "openai/clip-vit-base-patch32",
                 "clip_threshold": 0.15,
                 "ocr_engine": "easyocr",
                 "use_object_detection": True,
@@ -240,85 +250,145 @@ class PrivacyRiskAnalyzer:
             }
         }
         return configs[self.performance_mode]
-    
-    def _get_ocr_engine(self):
-        preferred_engine = self.config["ocr_engine"]
-        
-        if preferred_engine == "paddleocr" and PADDLEOCR_AVAILABLE:
-            if not hasattr(self, '_paddle_ocr'):
+
+    def _preload_models(self): # added
+        """Loads all required models at startup (with progress)"""
+        import time
+
+        # 1. CLIP
+        start = time.time()
+        print(f"  Loading CLIP model ({self.config['clip_model']})...")
+        self._load_clip_model()
+        print(f"    ✓ CLIP loaded in {time.time()-start:.1f}s")
+
+        # 2. OCR Engine
+        if self.config["ocr_engine"]:                    # _get_config_for_mode()["ocr_engine"]:
+            start = time.time()
+            engine = self._get_ocr_engine()
+            print(f"    ✓ OCR ({engine}) ready in {time.time()-start:.1f}s")
+
+        # 3. YOLO Model (if BALANCED/PRECISION)
+        if self.config["use_object_detection"]:
+            start = time.time()
+            print(f"  Loading YOLO model...")
+            self._load_yolo_model()
+            print(f"    ✓ YOLO loaded in {time.time()-start:.1f}s")
+
+    def _load_yolo_model(self): # added
+        """Cached YOLO loading"""
+        if PrivacyRiskAnalyzer._yolo_cache is None:
+            # uses local cache path
+            model_path = os.path.join(self.models_dir, "yolov8m.pt")
+
+            if os.path.exists(model_path):
+                print(f"    Using cached YOLO from {model_path}")
+                PrivacyRiskAnalyzer._yolo_cache = YOLO(model_path)
+            else:
+                print(f"    Downloading YOLO (~50MB)...")
+                PrivacyRiskAnalyzer._yolo_cache = YOLO('yolov8m.pt')
                 try:
-                    # Try new PaddleOCR API first
-                    self._paddle_ocr = paddleocr.PaddleOCR(
-                        use_textline_orientation=True,
-                        lang='en',
-                        show_log=False
-                    )
-                    return "paddle"
-                except Exception as e:
-                    try:
-                        # Fallback to older API
-                        self._paddle_ocr = paddleocr.PaddleOCR(
-                            use_angle_cls=True,
-                            lang='en',
-                            show_log=False
-                        )
-                        return "paddle"
-                    except Exception as e2:
-                        print(f"PaddleOCR initialization failed: {e2}")
-            
-            if hasattr(self, '_paddle_ocr'):
-                return "paddle"
-        
-        if preferred_engine == "easyocr" and EASYOCR_AVAILABLE:
-            if not hasattr(self, '_easy_ocr'):
-                self._easy_ocr = easyocr.Reader(['en', 'de', 'fr'], gpu=self.device == "cuda")
-            return "easy"
-        
-        if TESSERACT_AVAILABLE:
-            return "tesseract"
-        
-        return None
-    
-    def _load_clip_model(self):
-        """Load CLIP model with caching"""
+                    PrivacyRiskAnalyzer._yolo_cache.save(model_path)
+                except AttributeError:
+                    print(f"    Warning: Could not save YOLO model to {model_path}")
+
+        self._yolo_model = PrivacyRiskAnalyzer._yolo_cache
+
+    def _load_clip_model(self): # added
+        """Load CLIP model with global caching"""
         model_name = self.config["clip_model"]
-        
-        if model_name not in self.models:
-            model = CLIPModel.from_pretrained(model_name)
-            processor = CLIPProcessor.from_pretrained(model_name)
-            model = model.to(self.device)
-            
-            self.models[model_name] = {
-                "model": model,
-                "processor": processor
-            }
-        
+
+        if not hasattr(PrivacyRiskAnalyzer, '_global_model_cache'):
+            PrivacyRiskAnalyzer._global_model_cache = {}
+
+        if model_name not in PrivacyRiskAnalyzer._global_model_cache:
+            # Erste Ladung - kann lange dauern
+            print(f"      Downloading/loading from HuggingFace cache...")
+            try:
+                model = CLIPModel.from_pretrained(model_name)
+                processor = CLIPProcessor.from_pretrained(model_name)
+                model = model.to(self.device)
+
+                PrivacyRiskAnalyzer._global_model_cache[model_name] = {
+                    "model": model,
+                    "processor": processor
+                }
+            except Exception as e:
+                print(f"    Failed to load CLIP model: {e}")
+                raise
+        else:
+            print(f"Using cached CLIP model")
+
+        self.models = {model_name: PrivacyRiskAnalyzer._global_model_cache[model_name]}
         return self.models[model_name]["model"], self.models[model_name]["processor"]
 
+
+    def _get_ocr_engine(self): #changed
+        """Cached OCR engine loading"""
+        preferred_engine = self.config["ocr_engine"]
+        cache_key = f"{preferred_engine}_{self.device}"
+
+        if not hasattr(PrivacyRiskAnalyzer, '_ocr_cache'):
+            PrivacyRiskAnalyzer._ocr_cache = {}
+
+        if preferred_engine == "easyocr" and EASYOCR_AVAILABLE:
+            if cache_key not in PrivacyRiskAnalyzer._ocr_cache:
+                print(f"      Initializing EasyOCR (first time: ~500MB download)...")
+                # REDUZIERE Sprachen für schnelleres Laden!
+                PrivacyRiskAnalyzer._ocr_cache[cache_key] = easyocr.Reader(
+                    ['en'],  # NUR Englisch! Füge 'de' nur wenn wirklich nötig: will changed this to german and english.. maybe
+                    gpu=self.device == "cuda",
+                    download_enabled=True,
+                    verbose=False
+                )
+            self._easy_ocr = PrivacyRiskAnalyzer._ocr_cache[cache_key]
+            return "easy"
+
+        # Tesseract is instant - no caching needed
+        if TESSERACT_AVAILABLE:
+            return "tesseract"
+
+        return None
+
+    # def _load_clip_model(self):
+     #   """Load CLIP model with caching"""
+      #  model_name = self.config["clip_model"]
+      #
+      #  if model_name not in self.models:
+     #       model = CLIPModel.from_pretrained(model_name)
+      #      processor = CLIPProcessor.from_pretrained(model_name)
+      #      model = model.to(self.device)
+      #
+      #      self.models[model_name] = {
+      #          "model": model,
+      #          "processor": processor
+      #      }
+
+      #  return self.models[model_name]["model"], self.models[model_name]["processor"]
+
     def _detect_objects_with_yolo(self, image_path: str) -> List[Tuple[str, Tuple[int, int, int, int], float]]:
-        """Use YOLO to detect objects and get bounding boxes"""
+        """Use cached YOLO model to detect objects and get bounding boxes"""
         if not YOLO_AVAILABLE or not self.config["use_object_detection"]:
             return []
-        
+
         try:
             # Load YOLO model (will download first time)
             if not hasattr(self, '_yolo_model'):
-                self._yolo_model = YOLO('yolov8m.pt')  # Medium version for better accuracy
-            
+                self._load_yolo_model()
+
             # Load original image size for scaling
             original_image = Image.open(image_path)
             original_size = original_image.size
-            
+
             # Run inference
             results = self._yolo_model(image_path, verbose=False)
             detections = []
-            
-            # YOLO class names that could indicate privacy risks
+
+            # YOLO class names that could indicate privacy risks; also Finetuning
             risky_classes = {
                 'stop sign': 4, 'traffic light': 9, 'car': 3, 'truck': 7, 'bus': 5,
                 'person': 1, 'bicycle': 1, 'motorcycle': 3
             }
-            
+
             for result in results:
                 boxes = result.boxes
                 if boxes is not None:
@@ -327,22 +397,22 @@ class PrivacyRiskAnalyzer:
                         class_id = int(box.cls[0])
                         class_name = self._yolo_model.names[class_id]
                         confidence = float(box.conf[0])
-                        
+
                         # Get bounding box coordinates
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                        
+
                         # Scale bounding box to match original image size
                         scale_x = original_size[0] / result.orig_shape[1]
                         scale_y = original_size[1] / result.orig_shape[0]
                         x1, x2 = int(x1 * scale_x), int(x2 * scale_x)
                         y1, y2 = int(y1 * scale_y), int(y2 * scale_y)
-                        
+
                         # Only include objects that might be privacy-relevant
                         if (class_name in risky_classes and confidence > 0.3) or 'sign' in class_name.lower():
                             detections.append((class_name, (x1, y1, x2, y2), confidence))
-            
+
             return detections
-            
+
         except Exception as e:
             print(f"YOLO detection failed: {e}")
             return []
@@ -351,7 +421,7 @@ class PrivacyRiskAnalyzer:
         """Perform OCR using best available engine"""
         engine = self._get_ocr_engine()
         results = []
-        
+
         if engine == "paddle":
             try:
                 ocr_results = self._paddle_ocr.ocr(image, cls=True)
@@ -365,7 +435,7 @@ class PrivacyRiskAnalyzer:
             except Exception as e:
                 print(f"PaddleOCR failed: {e}")
                 return []
-                
+
         elif engine == "easy":
             try:
                 ocr_results = self._easy_ocr.readtext(image)
@@ -377,7 +447,7 @@ class PrivacyRiskAnalyzer:
             except Exception as e:
                 print(f"EasyOCR failed: {e}")
                 return []
-                
+
         elif engine == "tesseract":
             try:
                 import pytesseract
@@ -389,13 +459,13 @@ class PrivacyRiskAnalyzer:
             except Exception as e:
                 print(f"Tesseract failed: {e}")
                 return []
-        
+
         return results
 
     def analyze_image_risks(self, image_path: str) -> Tuple[List[RiskDetection], np.ndarray]:
         """Analyze image for privacy risks and return detections + masked image"""
         risks = []
-        
+
         try:
             image = Image.open(image_path).convert("RGB")
 
@@ -412,10 +482,10 @@ class PrivacyRiskAnalyzer:
             image_resized = image.resize(target_size, Image.Resampling.LANCZOS)
         except Exception as e:
             return [RiskDetection("error", 1, f"Image load error: {e}")], None
-        
+
         # Load CLIP model
         model, processor = self._load_clip_model()
-        
+
         # Prepare all risk pattern labels
         all_labels = []
         label_to_category = {}
@@ -430,13 +500,13 @@ class PrivacyRiskAnalyzer:
             for pattern in data["patterns"]:
                 all_labels.append(pattern)
                 label_to_category[pattern] = category
-        
+
         # CLIP analysis
         inputs = processor(text=all_labels, images=image_resized, return_tensors="pt", padding=True)
-        
+
         with torch.no_grad():
             outputs = model(**inputs.to(self.device))
-        
+
         probs = outputs.logits_per_image.softmax(dim=1).cpu().numpy()[0]
 
         highest_prob_index = np.argmax(probs)
@@ -445,14 +515,14 @@ class PrivacyRiskAnalyzer:
         if label_to_category[highest_prob_label] == "no_risk":
             masked_image = self._create_masked_image(image_path, [])
             return [RiskDetection ("info", 1, "Image content does not suggest any privacy risks.")], masked_image
-        
+
         # Filter detections based on mode-specific threshold
         threshold = self.config["clip_threshold"]
         for label, prob in zip(all_labels, probs):
             if prob > threshold:
                 category = label_to_category[label]
                 risk_data = self.RISK_PATTERNS[category]
-                
+
                 risk = RiskDetection(
                     category=category,
                     risk_level=risk_data["risk_level"],
@@ -460,12 +530,12 @@ class PrivacyRiskAnalyzer:
                     bbox=None  # CLIP doesn't give bounding boxes
                 )
                 risks.append(risk)
-        
+
         # YOLO Object Detection for precise masking
         yolo_detections = []
         if self.config["use_object_detection"]:
             yolo_detections = self._detect_objects_with_yolo(image_path)
-            
+
             # Convert YOLO detections to risks with bounding boxes
             for obj_name, bbox, confidence in yolo_detections:
                 # Map YOLO classes to risk categories
@@ -478,17 +548,17 @@ class PrivacyRiskAnalyzer:
                     ))
                 elif obj_name in ['car', 'truck', 'bus', 'motorcycle']:
                     risks.append(RiskDetection(
-                        category="vehicle_with_plates", 
+                        category="vehicle_with_plates",
                         risk_level=3,
                         description=f"Vehicle detected: {obj_name} (potential license plate)",
                         bbox=bbox
                     ))
-        
+
         # OCR Analysis
         if self._get_ocr_engine():
             try:
                 ocr_results = self._perform_ocr(np.array(image))
-                
+
                 for text, bbox, confidence in ocr_results:
                     if confidence > 0.5:  # Only high-confidence text
                         # Scale bbox to original image size
@@ -498,9 +568,9 @@ class PrivacyRiskAnalyzer:
                             scale_y = original_size[1] / image.size[1]
                             x1, x2 = int(x1 * scale_x), int(x2 * scale_x)
                             y1, y2 = int(y1 * scale_y), int(y2 * scale_y)
-                        
+
                         scaled_bbox = (x1, y1, x2, y2)
-                        
+
                         # Check OCR text against patterns
                         matched = False
                         for category, data in self.TEXT_RISK_PATTERNS.items():
@@ -519,7 +589,7 @@ class PrivacyRiskAnalyzer:
                             # Potential risk for unrecognized text
 
                             street_suffixes = [
-                                r'straße\b', r'gasse\b', r'weg\b', r'platz\b', r'allee\b', r'ufer\b',  # Deutsch
+                                r'straße\b', r'gasse\b', r'weg\b', r'platz\b', r'allee\b', r'ufer\b', r'dammb',  # Deutsch
                                 r'street\b', r'road\b', r'avenue\b', r'lane\b', r'drive\b', r'court\b', # Englisch
                                 r'rue\b', r'boulevard\b', # Französisch
                                 r'via\b', r'piazza\b' # Italienisch
@@ -557,14 +627,14 @@ class PrivacyRiskAnalyzer:
                 risks.append(RiskDetection("ocr_error", 1, f"OCR analysis failed: {e}"))
         else:
             risks.append(RiskDetection("ocr_warning", 1, "No OCR engine available - install tesseract, easyocr, or paddleocr"))
-        
+
         # Create masked image
         masked_image = self._create_masked_image(image_path, risks)
-        
+
         # Clean up GPU memory
         if self.device == "cuda":
             torch.cuda.empty_cache()
-            
+
         return risks, masked_image
 
     def _create_masked_image(self, image_path: str, risks: List[RiskDetection]) -> np.ndarray:
@@ -573,55 +643,55 @@ class PrivacyRiskAnalyzer:
         if image is None:
             print(f"Failed to load image: {image_path}")
             return None
-        
+
         overlay = image.copy()
         has_precise_masks = False
-        
+
         # Mask detected objects with bounding boxes (YOLO + OCR)
         for risk in risks:
             if risk.bbox and risk.risk_level >= 3:
                 x1, y1, x2, y2 = risk.bbox
-                
+
                 # Choose color based on risk level
                 if risk.risk_level >= 4:
                     color = (0, 0, 255)  # Red for high risk
                 else:
                     color = (0, 165, 255)  # Orange for potential risk
-                
+
                 # Draw semi-transparent rectangle over the object
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
-                
+
                 # Add warning label above the box
                 label = risk.category.replace('_', ' ').replace('text ', '').upper()
                 label_y = max(y1 - 10, 15)
-                cv2.putText(overlay, f"⚠️ {label}", (x1, label_y), 
+                cv2.putText(overlay, f"⚠️ {label}", (x1, label_y),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-                
+
                 # Add border around the masked area
                 cv2.rectangle(overlay, (x1-2, y1-2), (x2+2, y2+2), color, 3)
-                
+
                 has_precise_masks = True
-        
+
         # For CLIP risks without bounding boxes, add corner indicators
         clip_only_risks = [r for r in risks if not r.bbox and r.risk_level >= 3]
         if clip_only_risks and not has_precise_masks:
             # Add corner warnings since we can't mask precisely
             h, w = image.shape[:2]
-            
+
             # Top corners with warning triangles
             triangle_size = 50
             triangle = np.array([[0, 0], [triangle_size, 0], [0, triangle_size]], np.int32)
             cv2.fillPoly(overlay, [triangle], (0, 0, 255))  # Top-left
-            
-            triangle_tr = np.array([[w, 0], [w-triangle_size, 0], [w, triangle_size]], np.int32)  
+
+            triangle_tr = np.array([[w, 0], [w-triangle_size, 0], [w, triangle_size]], np.int32)
             cv2.fillPoly(overlay, [triangle_tr], (0, 0, 255))  # Top-right
-            
+
             # Warning text
-            cv2.putText(overlay, "⚠️ PRIVACY RISKS - LOCATION UNCLEAR", 
+            cv2.putText(overlay, "⚠️ PRIVACY RISKS - LOCATION UNCLEAR",
                        (triangle_size + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            
+
             has_precise_masks = True
-        
+
         if has_precise_masks:
             # Blend overlay with original image
             alpha = 0.6  # More opaque for better visibility
@@ -629,19 +699,19 @@ class PrivacyRiskAnalyzer:
         else:
             # No risks found - add green checkmark
             masked = image.copy()
-            cv2.putText(masked, "✅ LOW PRIVACY RISK", (10, 30), 
+            cv2.putText(masked, "✅ LOW PRIVACY RISK", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 0), 3)
-        
+
         return masked
 
     def calculate_overall_risk(self, risks: List[RiskDetection]) -> Tuple[int, str]:
         """Calculate overall privacy risk score"""
         if not risks:
             return 0, "No privacy risks detected"
-        
+
         max_risk = max(risk.risk_level for risk in risks)
         risk_count = len([r for r in risks if r.risk_level >= 3])
-        
+
         if max_risk >= 4 or risk_count >= 3:
             return 5, "🔴 CRITICAL: High location disclosure risk!"
         elif max_risk >= 3 or risk_count >= 2:
@@ -687,21 +757,21 @@ class PrivacyRiskAnalyzer:
             del model_data["model"]
             del model_data["processor"]
         self.models.clear()
-        
+
         if hasattr(self, '_yolo_model'):
             del self._yolo_model
         if hasattr(self, '_easy_ocr'):
             del self._easy_ocr
         if hasattr(self, '_paddle_ocr'):
             del self._paddle_ocr
-        
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
 class ImageDropWidget(QLabel):
     """Custom widget for drag & drop functionality"""
     imageDropped = Signal(str)
-    
+
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
@@ -722,7 +792,7 @@ class ImageDropWidget(QLabel):
         """)
         self.setText("Drag & Drop image here or click to browse")
         self.setMinimumHeight(100)
-    
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -736,7 +806,7 @@ class ImageDropWidget(QLabel):
                     font-size: 14px;
                 }
             """)
-    
+
     def dragLeaveEvent(self, event):
         self.setStyleSheet("""
             QLabel {
@@ -748,16 +818,16 @@ class ImageDropWidget(QLabel):
                 font-size: 14px;
             }
         """)
-    
+
     def dropEvent(self, event):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         if files and any(files[0].lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif']):
             self.imageDropped.emit(files[0])
         self.dragLeaveEvent(event)
-    
+
     def mousePressEvent(self, event):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Image", "", 
+            self, "Select Image", "",
             "Image Files (*.jpg *.jpeg *.png *.bmp *.gif)"
         )
         if file_path:
@@ -775,28 +845,28 @@ class RiskLevelWidget(QFrame):
                 margin: 5px;
             }
         """)
-        
+
         layout = QHBoxLayout(self)
         self.icon_label = QLabel()
         self.icon_label.setFixedSize(30, 30)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.text_label = QLabel("No analysis performed yet")
         self.text_label.setFont(QFont("", 12, QFont.Weight.Bold))
-        
+
         layout.addWidget(self.icon_label)
         layout.addWidget(self.text_label)
         layout.addStretch()
-    
+
     def set_risk_level(self, level: int, message: str):
         colors = {
             0: ("#3e3e3e", "#ff0000", "❓"),
-            1: ("#3e3e3e", "#0bbd17", "✅"), 
+            1: ("#3e3e3e", "#0bbd17", "✅"),
             2: ("#3e3e3e", "#c9c012", "🟡"),
             3: ("#3e3e3e", "#c9c012", "🟡"),
             4: ("#3e3e3e", "#f20017", "🔴"),
             5: ("#3e3e3e", "#f20017", "🔴")
         }
-        
+
         bg_color, text_color, icon = colors.get(level, colors[0])
         self.setStyleSheet(f"""
             QFrame {{
@@ -806,7 +876,7 @@ class RiskLevelWidget(QFrame):
                 padding: 10px;
             }}
         """)
-        
+
         self.icon_label.setText(icon)
         self.icon_label.setFont(QFont("", 16))
         self.text_label.setText(message)
@@ -820,32 +890,32 @@ class GeoLensPrivacyGuard(QMainWindow):
         self.current_masked_image = None
         self.current_risks = None
         self.analysis_worker = None
-        
+
         self.setWindowTitle("🛡️ GeoLens Privacy Guard")
         self.setMinimumSize(900, 800)
         self.setup_ui()
         self.apply_modern_style()
-    
+
     def setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        
+
         # Header
         header_layout = QVBoxLayout()
         title_label = QLabel("GeoLens Privacy Guard")
         title_label.setFont(QFont("", 18, QFont.Weight.Bold))
         subtitle_label = QLabel("Analyze images for location privacy risks before sharing")
         subtitle_label.setStyleSheet("color: #00bcd4; font-size: 12px;")
-        
+
         header_layout.addWidget(title_label)
         header_layout.addWidget(subtitle_label)
         main_layout.addLayout(header_layout)
-        
+
         # Performance Mode Selection
         perf_group = QGroupBox("Performance Mode")
         perf_layout = QVBoxLayout(perf_group)
-        
+
         self.mode_buttons = QButtonGroup()
         self.fast_radio = QRadioButton("Fast: CPU-based, lightweight (Tesseract OCR)")
         self.fast_radio.setIcon(IconManager.get_icon("zap",16))
@@ -853,24 +923,24 @@ class GeoLensPrivacyGuard(QMainWindow):
         self.balanced_radio.setIcon(IconManager.get_icon("scale",16))
         self.precision_radio = QRadioButton("Precision: Full GPU power, best accuracy (EasyOCR + Large CLIP)")
         self.precision_radio.setIcon(IconManager.get_icon("crosshair",16))
-        
+
         self.balanced_radio.setChecked(True)  # Default
-        
+
         self.mode_buttons.addButton(self.fast_radio, 0)
         self.mode_buttons.addButton(self.balanced_radio, 1)
         self.mode_buttons.addButton(self.precision_radio, 2)
-        
+
         perf_layout.addWidget(self.fast_radio)
         perf_layout.addWidget(self.balanced_radio)
         perf_layout.addWidget(self.precision_radio)
-        
+
         apply_button = QPushButton("Apply Mode")
         apply_button.setIcon(IconManager.get_icon("refresh",16))
         apply_button.clicked.connect(self.update_analyzer)
         perf_layout.addWidget(apply_button)
-        
+
         main_layout.addWidget(perf_group)
-        
+
         # Status Bar
         self.status_label = QLabel("Select performance mode and click 'Apply Mode'")
         self.status_label.setStyleSheet("""
@@ -882,7 +952,7 @@ class GeoLensPrivacyGuard(QMainWindow):
             }
         """)
         main_layout.addWidget(self.status_label)
-        
+
         # Progress Bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -899,12 +969,12 @@ class GeoLensPrivacyGuard(QMainWindow):
             }
         """)
         main_layout.addWidget(self.progress_bar)
-        
+
         # Image Drop Area
         self.drop_widget = ImageDropWidget()
         self.drop_widget.imageDropped.connect(self.on_image_selected)
         main_layout.addWidget(self.drop_widget)
-        
+
         # Analysis Button
         self.analyze_button = QPushButton("Analyze Privacy Risks")
         self.analyze_button.setIcon(IconManager.get_icon("search", 16))
@@ -929,45 +999,45 @@ class GeoLensPrivacyGuard(QMainWindow):
             }
         """)
         main_layout.addWidget(self.analyze_button)
-        
+
         # Risk Level Display
         self.risk_widget = RiskLevelWidget()
         main_layout.addWidget(self.risk_widget)
-        
+
         # Results Area
         results_group = QGroupBox("Privacy Risk Analysis Results")
         results_layout = QVBoxLayout(results_group)
-        
+
         self.results_text = QTextEdit()
         self.results_text.setFont(QFont("Consolas", 10))
         self.results_text.setReadOnly(True)
         results_layout.addWidget(self.results_text)
-        
+
         # Action Buttons
         button_layout = QHBoxLayout()
-        
+
         self.save_button = QPushButton("Save Masked Image")
         self.save_button.setIcon(IconManager.get_icon("save",16))
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self.save_masked_image)
-        
+
         self.export_button = QPushButton("Export Report")
         self.export_button.setIcon(IconManager.get_icon("document",16))
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_report)
-        
+
         self.clear_button = QPushButton("Clear Results")
         self.clear_button.setIcon(IconManager.get_icon("trash",16))
         self.clear_button.clicked.connect(self.clear_results)
-        
+
         button_layout.addWidget(self.save_button)
         button_layout.addWidget(self.export_button)
         button_layout.addWidget(self.clear_button)
         button_layout.addStretch()
-        
+
         results_layout.addLayout(button_layout)
         main_layout.addWidget(results_group)
-    
+
     def apply_modern_style(self):
         self.setStyleSheet("""
             QMainWindow {
@@ -1008,53 +1078,94 @@ class GeoLensPrivacyGuard(QMainWindow):
                 font-family: 'Consolas', 'Monaco', monospace;
             }
         """)
-    
+
     def update_analyzer(self):
         mode_map = {0: PerformanceMode.FAST, 1: PerformanceMode.BALANCED, 2: PerformanceMode.PRECISION}
         selected_mode = mode_map[self.mode_buttons.checkedId()]
-        
-        self.analyzer = PrivacyRiskAnalyzer(selected_mode)
-        self.status_label.setText(f"Mode: {selected_mode.value.upper()} | Device: {self.analyzer.device.upper()}")
-        
-        if self.current_image_path:
+
+        # Loading-Indikator
+        self.status_label.setText(f"Loading {selected_mode.value.upper()} mode models...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # Indeterminate
+
+        # Blocks UI while Init
+        self.fast_radio.setEnabled(False)
+        self.balanced_radio.setEnabled(False)
+        self.precision_radio.setEnabled(False)
+        QApplication.processEvents()  # Update UI
+
+        # Init Analyzer (Model-Loading)
+        import time
+        start_time = time.time()
+
+        # sets analyzer
+        try:
+            self.analyzer = PrivacyRiskAnalyzer(selected_mode)
+        except Exception as e:
+            self.status_label.setText(f"Failed to initialize analyzer: {e}")
+            self.progress_bar.setVisible(False)
+            self.fast_radio.setEnabled(True)
+            self.balanced_radio.setEnabled(True)
+            self.precision_radio.setEnabled(True)
+            return
+
+        # wait for full Init
+        QApplication.processEvents()
+
+        elapsed = time.time() - start_time
+
+        # Update Status only if analyzer was init
+        self.status_label.setText(
+            f"Mode: {selected_mode.value.upper()} | "
+            f"Device: {self.analyzer.device.upper()} | "
+            f"Init time: {elapsed:.1f}s"
+        )
+        self.progress_bar.setVisible(False)
+
+        # Re-enable UI
+        self.fast_radio.setEnabled(True)
+        self.balanced_radio.setEnabled(True)
+        self.precision_radio.setEnabled(True)
+
+        if self.current_image_path and self.analyzer:
             self.analyze_button.setEnabled(True)
-    
+
     def on_image_selected(self, file_path: str):
         self.current_image_path = file_path
         filename = file_path.split('/')[-1] if '/' in file_path else file_path.split('\\')[-1]
         self.drop_widget.setText(f"Selected: {filename}")
-        
+
         if self.analyzer:
             self.analyze_button.setEnabled(True)
-    
+
     def analyze_image(self):
         if not self.current_image_path or not self.analyzer:
             return
-        
+
         # Disable UI during analysis
         self.analyze_button.setEnabled(False)
         self.results_text.clear()
         self.results_text.append("Analyzing image for privacy risks...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
-        
+
         mode_name = ["FAST", "BALANCED", "PRECISION"][self.mode_buttons.checkedId()]
         self.results_text.append(f"Using {mode_name} mode with {self.analyzer.device.upper()} processing...\n")
-        
+
         self.analysis_worker = AnalysisWorker(self.analyzer, self.current_image_path)
         self.analysis_worker.progress.connect(self.on_analysis_progress)
         self.analysis_worker.finished.connect(self.on_analysis_finished)
         self.analysis_worker.start()
-    
+
     def on_analysis_progress(self, message: str):
         self.results_text.append(message)
-    
+
     def on_analysis_finished(self, risks: List[RiskDetection], masked_image):
         self.current_masked_image = masked_image
         self.current_risks = risks
-        
+
         self.progress_bar.setVisible(False)
-        
+
         # Check for errors in risks
         errors = [r for r in risks if r.category.startswith("error") or r.category.endswith("_error")]
         if errors:
@@ -1065,86 +1176,86 @@ class GeoLensPrivacyGuard(QMainWindow):
             self.risk_widget.set_risk_level(0, "Analysis failed due to errors")
             self.analyze_button.setEnabled(True)
             return
-        
+
         # Calculate overall risk
         overall_risk, risk_msg = self.analyzer.calculate_overall_risk(risks)
         self.risk_widget.set_risk_level(overall_risk, risk_msg)
-        
+
         # Display detailed results
         self.results_text.clear()
         self.results_text.append(f"Analysis Complete - {risk_msg}")
         self.results_text.append("=" * 60 + "\n")
-        
+
         if risks:
             # Group by risk level
             critical_risks = [r for r in risks if r.risk_level >= 4]
             moderate_risks = [r for r in risks if r.risk_level == 3]
             low_risks = [r for r in risks if r.risk_level <= 2]
-            
+
             if critical_risks:
                 self.results_text.append("CRITICAL RISKS:")
                 for risk in critical_risks:
                     self.results_text.append(f"  • {risk.description}")
                 self.results_text.append("")
-            
+
             if moderate_risks:
                 self.results_text.append("MODERATE RISKS:")
                 for risk in moderate_risks:
                     self.results_text.append(f"  • {risk.description}")
                 self.results_text.append("")
-            
+
             if low_risks:
                 self.results_text.append("LOW RISKS:")
                 for risk in low_risks:
                     self.results_text.append(f"  • {risk.description}")
                 self.results_text.append("")
-            
+
             self.results_text.append("RECOMMENDATIONS:")
             if critical_risks or len(moderate_risks) >= 2:
                 self.results_text.append("⚠️  Consider editing out sensitive elements before sharing")
                 self.results_text.append("⚠️  Use the masked version to see what needs attention")
             else:
                 self.results_text.append("✅ Image appears relatively safe for sharing")
-            
+
             if self.current_masked_image is not None:
                 self.save_button.setEnabled(True)
                 self.export_button.setEnabled(True)
         else:
             self.results_text.append("✅ No significant privacy risks detected!")
             self.results_text.append("Image appears safe for sharing.")
-        
+
         # Re-enable UI
         self.analyze_button.setEnabled(True)
-    
+
     def save_masked_image(self):
         if self.current_masked_image is None:
             return
-        
+
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Masked Image", "", 
+            self, "Save Masked Image", "",
             "JPEG Files (*.jpg);;PNG Files (*.png);;All Files (*)"
         )
-        
+
         if file_path:
             cv2.imwrite(file_path, self.current_masked_image)
             self.results_text.append(f"\n💾 Masked image saved to: {file_path}")
-    
+
     def export_report(self):
         if not self.current_risks:
             return
-        
+
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Analysis Report", "", 
+            self, "Save Analysis Report", "",
             "JSON Files (*.json);;All Files (*)"
         )
-        
+
         if file_path:
             success = self.analyzer.export_analysis_report(self.current_risks, file_path)
             if success:
                 self.results_text.append(f"\n📄 Report saved to: {file_path}")
             else:
                 self.results_text.append("\n❌ Failed to save report")
-    
+
     def clear_results(self):
         self.results_text.clear()
         self.risk_widget.set_risk_level(0, "No analysis performed yet")
@@ -1155,20 +1266,23 @@ class GeoLensPrivacyGuard(QMainWindow):
         if self.analyzer:
             self.analyzer.cleanup_models()
 
+# STARTUP OPTIMIZATION
 def main():
     app = QApplication(sys.argv)
-    
-    # Set application properties
+
     app.setApplicationName("GeoLens Privacy Guard")
-    app.setApplicationVersion("2.0")
+    app.setApplicationVersion("2.0 - Optimized")
     app.setOrganizationName("GeoLens")
-    
-    # Modern Windows 11 style
     app.setStyle('Fusion')
-    
+
     window = GeoLensPrivacyGuard()
     window.show()
-    
+
+    # Pre-warm: Initialisiere Analyzer DIRECTLY at start
+    print("\n=== PRE-WARMING MODELS ===")
+    window.update_analyzer()  # Loads BALANCED mode as default
+    print("=== READY ===\n")
+
     sys.exit(app.exec())
 
 if __name__ == "__main__":
